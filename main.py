@@ -1,98 +1,74 @@
-import asyncio
-from aiogram import Bot, Dispatcher
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
-from aiogram.enums import ChatType
-from aiogram.filters import Command
-import config
 import logging
+from aiogram import Bot, Dispatcher, types
+from aiogram.utils.exceptions import MessageToDeleteNotFound, BadRequest
+from aiogram.contrib.middlewares.logging import LoggingMiddleware
+from aiogram.dispatcher.filters import Text
+from config import API_TOKEN, ADMIN_CHAT_ID
 
-# Настройка логирования
+# Логирование
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Инициализация бота
-bot = Bot(token=config.BOT_TOKEN)
+# Инициализация бота и диспетчера
+bot = Bot(token=API_TOKEN)
+dp = Dispatcher(bot)  # Правильная инициализация диспетчера с передачей объекта бота
 
-# Инициализация диспетчера
-dp = Dispatcher()
-
-# Клавиатура с кнопками "Старт" и "Выбрать источник"
-start_keyboard = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="Старт")],
-        [KeyboardButton(text="Выбрать источник")]
-    ],
-    resize_keyboard=True
-)
-
-# Клавиатура для выбора источника удаления
-source_keyboard = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="Удалять из личного чата")],
-        [KeyboardButton(text="Удалять из группы")]
-    ],
-    resize_keyboard=True
-)
-
-# Переменная для хранения выбранного источника
-user_source_choice = {}
+dp.middleware.setup(LoggingMiddleware())  # Подключаем middleware через setup()
 
 # Обработчик команды /start
-@dp.message(Command("start"))
-async def send_welcome(message: Message):
-    await message.answer(
-        "Привет! Нажми 'Старт', чтобы начать или выбери источник для удаления сообщений.",
-        reply_markup=start_keyboard
-    )
+@dp.message_handler(commands=['start'])  # Используем правильный декоратор
+async def send_welcome(message: types.Message):
+    await message.reply("Привет! Я бот для удаления сообщений.")
 
-# Обработчик нажатия кнопки "Старт"
-@dp.message(lambda message: message.text == "Старт")
-async def handle_start_button(message: Message):
-    await message.answer("Ты нажал на кнопку 'Старт'. Теперь можно выполнить команду /deleteAll.")
-
-# Обработчик нажатия кнопки "Выбрать источник"
-@dp.message(lambda message: message.text == "Выбрать источник")
-async def handle_source_button(message: Message):
-    await message.answer("Выбери источник для удаления сообщений:", reply_markup=source_keyboard)
-
-# Обработчик выбора источника удаления
-@dp.message(lambda message: message.text in ["Удалять из личного чата", "Удалять из группы"])
-async def handle_source_choice(message: Message):
-    choice = "private" if message.text == "Удалять из личного чата" else "group"
-    user_source_choice[message.from_user.id] = choice
-    await message.answer(f"Источник установлен: {message.text}. Теперь можно выполнить команду /deleteAll.")
-
-# Обработчик команды /deleteAll
-@dp.message(Command("deleteAll"))
-async def delete_all_messages(message: Message):
-    source = user_source_choice.get(message.from_user.id)
-
-    if not source:
-        await message.answer("Сначала выбери источник для удаления сообщений.")
-        return
-
-    chat_type = message.chat.type
-    if (source == "private" and chat_type != ChatType.PRIVATE) or \
-       (source == "group" and chat_type not in {ChatType.GROUP, ChatType.SUPERGROUP}):
-        await message.answer("Команда должна быть вызвана в соответствующем чате.")
-        return
-
-    await message.answer(f"Удаляю сообщения из: {source}")
-
+# Функция для удаления одного сообщения с обработкой ошибок
+async def delete_message(chat_id, message_id):
     try:
-        reply_message = await message.answer("Начинаю удаление сообщений...")
-        for message_id in range(reply_message.message_id, 0, -1):
-            try:
-                await bot.delete_message(chat_id=message.chat.id, message_id=message_id)
-            except Exception as e:
-                logging.error(f"Ошибка при удалении сообщения {message_id}: {e}")
-            await asyncio.sleep(config.DELETION_PAUSE / 1000.0)
+        await bot.delete_message(chat_id, message_id)
+        logger.info(f"Сообщение {message_id} успешно удалено.")
+    except MessageToDeleteNotFound:
+        logger.error(f"Сообщение {message_id} уже не существует.")
+    except BadRequest as e:
+        logger.error(f"Ошибка при удалении сообщения {message_id}: {e}")
     except Exception as e:
-        await message.answer(f"Произошла ошибка: {e}")
-        logging.error(f"Ошибка выполнения команды /deleteAll: {e}")
+        logger.error(f"Неизвестная ошибка при удалении сообщения {message_id}: {e}")
 
-async def main():
-    # Запуск polling с диспетчером и ботом
-    await dp.start_polling(bot)
+# Основная функция для удаления нескольких сообщений
+async def delete_messages(chat_id, message_ids):
+    for message_id in message_ids:
+        await delete_message(chat_id, message_id)
+    # Отправляем сообщение администратору о завершении процесса
+    await bot.send_message(ADMIN_CHAT_ID, "Удаление сообщений завершено.")
 
-if __name__ == '__main__':
-    asyncio.run(main())
+# Функция для проверки прав администратора
+async def check_admin_rights(chat_id, user_id):
+    try:
+        member = await bot.get_chat_member(chat_id, user_id)
+        return member.status in ["administrator", "creator"]  # Правильная проверка статуса
+    except Exception as e:
+        logger.error(f"Ошибка при проверке прав администратора: {e}")
+        return False
+
+# Функция для получения списка сообщений и их удаления
+@dp.message_handler(Text(equals="delete", ignore_case=True), chat_type=[types.ChatType.GROUP, types.ChatType.SUPERGROUP, types.ChatType.CHANNEL])
+async def handle_delete_command(message: types.Message):
+    chat_id = message.chat.id
+    message_ids = [msg_id for msg_id in range(message.message_id - 10, message.message_id)]  # пример списка ID
+
+    # Проверяем, что бот является администратором
+    if await check_admin_rights(chat_id, bot.id):
+        logger.info(f"Бот является администратором в чате {chat_id}. Начинаем удаление сообщений.")
+        await delete_messages(chat_id, message_ids)
+    else:
+        logger.warning(f"Бот не имеет прав администратора в чате {chat_id}.")
+        await message.reply("У меня нет прав для удаления сообщений!")
+
+# Глобальная обработка ошибок
+@dp.errors_handler()  # Используем правильный декоратор для обработки ошибок
+async def global_error_handler(update, exception):
+    logger.error(f"Произошла ошибка: {exception}")
+    return True  # Продолжаем работу, не прерываем выполнение
+
+# Основная функция запуска
+if __name__ == "__main__":
+    from aiogram import executor
+    executor.start_polling(dp, skip_updates=True)
