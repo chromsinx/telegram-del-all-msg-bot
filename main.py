@@ -1,6 +1,7 @@
 import asyncio
 from aiogram import Bot, Dispatcher
-from aiogram.types import Message, ChatType, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.enums import ChatType
 from aiogram.filters import Command
 import config
 import logging
